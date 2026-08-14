@@ -67,7 +67,7 @@ import type {
 // Design tokens
 // ---------------------------------------------------------------------------
 const palette = {
-  ink: "#151733",
+  ink: "#15332D",
   inkSoft: "#3E5850",
   paper: "#FBF7EF",
   paperDim: "#F1ECDF",
@@ -361,7 +361,7 @@ export default function OkPharmacyApp(): React.ReactElement {
 
   const theme = dark
     ? {
-        bg: "#0f101e",
+        bg: "#0F1E1A",
         card: "#16302A",
         ink: "#F1ECDF",
         inkSoft: "#B9C9C1",
@@ -1008,7 +1008,7 @@ const cartGrandTotal = useMemo(
         <aside
           className={`fixed md:static z-20 top-0 left-0 h-full md:h-auto w-64 flex-shrink-0 flex flex-col transition-transform duration-200 ${sidebarOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0"}`}
           style={{
-            backgroundColor: dark ? "#0e0c2a" : palette.ink,
+            backgroundColor: dark ? "#102019" : palette.ink,
             color: palette.paper,
           }}
         >
