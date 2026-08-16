@@ -1025,7 +1025,7 @@ const cartGrandTotal = useMemo(
             </div>
             <div>
               <div className="font-bold leading-tight font-space">
-                Sehat Dignostic Pharmacy
+                Brothers Pharmacy
               </div>
               <div className="text-xs" style={{ color: "#9FB6AC" }}>
                 Inventory System
@@ -1069,7 +1069,7 @@ const cartGrandTotal = useMemo(
           </nav>
 
           <div className="px-5 py-5 text-xs" style={{ color: "#7E9A8E" }}>
-            Sehat Dignostic Pharmacy by Shezi Digital Med &copy; 2025
+            Brothers Pharmacy by Shezi Digital Med &copy; 2025
             <br /> All rights reserved.
           </div>
         </aside>
@@ -2785,7 +2785,7 @@ const cartGrandTotal = useMemo(
                           className="font-bold font-space text-lg"
                           style={{ color: palette.ink }}
                         >
-                          Sehat Dignostic
+                          Brothers
                         </span>
                       </div>
                       <div
@@ -3006,7 +3006,7 @@ const cartGrandTotal = useMemo(
                               <div class="receipt mono">
                                 ${printContent.innerHTML}
                                 <div class="divider"></div>
-                                <p class="center small">Downloaded from Sehat Dignostic System</p>
+                                <p class="center small">Downloaded from Brothers System</p>
                               </div>
                               <script>
                                 window.onload = function() { window.focus(); window.print(); setTimeout(() => window.close(), 200); }

@@ -1,7 +1,7 @@
 import "./globals.css";
 
 export const metadata = {
-  title: "Sehat Dignostic  Pharmacy — Inventory System",
+  title: "Brothers  Pharmacy — Inventory System",
   description: "Pharmacy inventory management application",
 };
 
