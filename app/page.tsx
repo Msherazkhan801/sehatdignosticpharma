@@ -27,7 +27,16 @@ import {
   Receipt,
   User,
   MinusCircle,
+  Camera,
+  ScanLine,
+  Barcode,
+  CheckCircle2,
 } from "lucide-react";
+import {
+  CameraScannerModal,
+  type ScanFeedback,
+  playScanBeep,
+} from "@/components/CameraScannerModal";
 import {
   BarChart,
   Bar,
@@ -96,15 +105,18 @@ const LOW_STOCK_THRESHOLD = 4;
 type Tone = "mint" | "amber" | "red" | "ink";
 type Page = "dashboard" | "inventory" | "add" | "dailySell";
 
-function daysUntil(dateStr: string): number {
-  const today = new Date("2026-07-23T00:00:00");
-  const target = new Date(dateStr + "T00:00:00");
+function daysUntil(dateStr?: string): number {
+  if (!dateStr || !dateStr.trim()) return 9999;
+  const today = new Date();
+  const target = new Date(dateStr.includes("T") ? dateStr : `${dateStr}T00:00:00`);
+  if (isNaN(target.getTime())) return 9999;
   return Math.round(
     (target.getTime() - today.getTime()) / (1000 * 60 * 60 * 24),
   );
 }
 
-function expiryStatus(dateStr: string): "expired" | "soon" | "fresh" {
+function expiryStatus(dateStr?: string): "expired" | "soon" | "fresh" | "none" {
+  if (!dateStr || !dateStr.trim()) return "none";
   const d = daysUntil(dateStr);
   if (d < 0) return "expired";
   if (d <= 60) return "soon";
@@ -123,6 +135,7 @@ function emptyDraft(): Draft {
     buyingDiscount: "",
     supplier: "",
     expiryDate: "",
+    barcode: "",
   };
 }
 
@@ -304,6 +317,13 @@ export default function OkPharmacyApp(): React.ReactElement {
   const [cartDiscountType, setCartDiscountType] = useState<
     "percent" | "amount"
   >("percent");
+
+  // Barcode & QR Scanner state
+  const [scannerOpen, setScannerOpen] = useState<boolean>(false);
+  const [scannerContext, setScannerContext] = useState<"cart" | "draft">("cart");
+  const [continuousScanMode, setContinuousScanMode] = useState<boolean>(true);
+  const [scanFeedback, setScanFeedback] = useState<ScanFeedback | null>(null);
+  const [quickScanInput, setQuickScanInput] = useState<string>("");
 
   // Fetch medicines from Firestore on mount
   const fetchMedicines = useCallback(async () => {
@@ -506,7 +526,12 @@ export default function OkPharmacyApp(): React.ReactElement {
   const expiringMedicines = useMemo(
     () =>
       medicines
-        .filter((m) => expiryStatus(m.expiryDate) !== "fresh")
+        .filter(
+          (m) =>
+            Boolean(m.expiryDate) &&
+            (expiryStatus(m.expiryDate) === "expired" ||
+              expiryStatus(m.expiryDate) === "soon"),
+        )
         .sort((a, b) => a.expiryDate.localeCompare(b.expiryDate)),
     [medicines],
   );
@@ -529,9 +554,13 @@ export default function OkPharmacyApp(): React.ReactElement {
 
   const filteredMedicines = useMemo(() => {
     return medicines.filter((m) => {
+      const q = search.trim().toLowerCase();
       const matchesSearch =
-        m.name.toLowerCase().includes(search.toLowerCase()) ||
-        m.batchNo.toLowerCase().includes(search.toLowerCase());
+        !q ||
+        m.name.toLowerCase().includes(q) ||
+        m.batchNo.toLowerCase().includes(q) ||
+        (m.barcode && m.barcode.toLowerCase().includes(q)) ||
+        (m.supplier && m.supplier.toLowerCase().includes(q));
       const matchesCategory =
         categoryFilter === "All" || m.category === categoryFilter;
       return matchesSearch && matchesCategory;
@@ -566,7 +595,8 @@ const cartGrandTotal = useMemo(
       ? medicines.filter(
           (m) =>
             m.name.toLowerCase().includes(q) ||
-            m.batchNo.toLowerCase().includes(q),
+            m.batchNo.toLowerCase().includes(q) ||
+            (m.barcode && m.barcode.toLowerCase().includes(q)),
         )
       : medicines;
     return [...list].sort((a, b) => a.name.localeCompare(b.name));
@@ -589,12 +619,17 @@ const cartGrandTotal = useMemo(
   function startEdit(med: Medicine) {
     const isPresetCategory = CATEGORIES.includes(med.category);
     setDraft({
-      ...med,
+      id: med.id,
+      name: med.name,
       category: isPresetCategory ? med.category : CUSTOM_CATEGORY,
-      quantity: String(med.quantity),
-      purchasePrice: String(med.purchasePrice),
-      sellingPrice: String(med.sellingPrice),
-      buyingDiscount: String(med.buyingDiscount),
+      batchNo: med.batchNo || "",
+      quantity: med.quantity !== undefined ? String(med.quantity) : "",
+      purchasePrice: med.purchasePrice !== undefined ? String(med.purchasePrice) : "",
+      sellingPrice: med.sellingPrice !== undefined ? String(med.sellingPrice) : "",
+      buyingDiscount: med.buyingDiscount !== undefined ? String(med.buyingDiscount) : "",
+      supplier: med.supplier || "",
+      expiryDate: med.expiryDate || "",
+      barcode: med.barcode || "",
     });
     // If the medicine's category is not one of the presets, treat it as a custom category.
     setCustomCategory(isPresetCategory ? "" : med.category);
@@ -616,15 +651,8 @@ const cartGrandTotal = useMemo(
 
   async function saveDraft(e: React.FormEvent) {
     e.preventDefault();
-    if (
-      !draft.name.trim() ||
-      !draft.batchNo.trim() ||
-      !draft.quantity ||
-      !draft.expiryDate
-    ) {
-      setFormError(
-        "Fill in medicine name, batch number, quantity, and expiry date.",
-      );
+    if (!draft.name.trim()) {
+      setFormError("Medicine name is required.");
       return;
     }
     if (draft.category === CUSTOM_CATEGORY && !customCategory.trim()) {
@@ -643,16 +671,19 @@ const cartGrandTotal = useMemo(
     setSuccessMessage("");
 
     const name = draft.name.trim().toUpperCase();
-    const batchNo = draft.batchNo.trim().toUpperCase();
+    const batchNo = draft.batchNo.trim() ? draft.batchNo.trim().toUpperCase() : "N/A";
     const quantity = Number(draft.quantity) || 0;
     const purchasePrice = Number(draft.purchasePrice) || 0;
     const sellingPrice = Number(draft.sellingPrice) || 0;
     const buyingDiscount = Number(draft.buyingDiscount) || 0;
+    const supplier = draft.supplier.trim();
+    const expiryDate = draft.expiryDate.trim();
+    const barcode = draft.barcode.trim();
     // Resolve final category (title-case the custom one, e.g. "beauty cream" -> "Beauty Cream")
     const category =
       draft.category === CUSTOM_CATEGORY
-        ? toTitleCase(customCategory)
-        : draft.category;
+        ? (customCategory.trim() ? toTitleCase(customCategory) : "General")
+        : (draft.category || "General");
 
     try {
       if (draft.id) {
@@ -666,13 +697,15 @@ const cartGrandTotal = useMemo(
           purchasePrice,
           sellingPrice,
           buyingDiscount,
-          supplier: draft.supplier,
-          expiryDate: draft.expiryDate,
+          supplier,
+          expiryDate,
+          barcode,
         };
         await updateMedicine(payload);
         setMedicines((prev) =>
           prev.map((m) => (m.id === draft.id ? payload : m)),
         );
+        setSuccessMessage(`Updated "${name}" successfully.`);
       } else {
         // Create new — merge if same name + same batch already exists
         const existing = medicines.find(
@@ -686,12 +719,13 @@ const cartGrandTotal = useMemo(
           const updated: Medicine = {
             ...existing,
             quantity: existing.quantity + quantity,
-            purchasePrice,
-            sellingPrice,
-            buyingDiscount,
+            purchasePrice: purchasePrice || existing.purchasePrice,
+            sellingPrice: sellingPrice || existing.sellingPrice,
+            buyingDiscount: buyingDiscount || existing.buyingDiscount,
             category,
-            supplier: draft.supplier || existing.supplier,
-            expiryDate: draft.expiryDate || existing.expiryDate,
+            supplier: supplier || existing.supplier,
+            expiryDate: expiryDate || existing.expiryDate,
+            barcode: barcode || existing.barcode || "",
           };
           await updateMedicine(updated);
           setMedicines((prev) =>
@@ -714,8 +748,9 @@ const cartGrandTotal = useMemo(
           purchasePrice,
           sellingPrice,
           buyingDiscount,
-          supplier: draft.supplier,
-          expiryDate: draft.expiryDate,
+          supplier,
+          expiryDate,
+          barcode,
         });
         setMedicines((prev) => [...prev, newMed]);
         setSuccessMessage(`"${name}" added to inventory.`);
@@ -730,6 +765,109 @@ const cartGrandTotal = useMemo(
       setSaving(false);
     }
   }
+
+  // ─── Barcode & Scan Handler ───────────────────────────────────
+
+  const handleScanMedicine = useCallback(
+    (code: string) => {
+      const trimmed = code.trim();
+      if (!trimmed) return;
+
+      if (scannerContext === "draft") {
+        setDraft((d) => ({ ...d, barcode: trimmed }));
+        setScanFeedback({
+          text: `Barcode captured: ${trimmed}`,
+          isError: false,
+        });
+        playScanBeep(true);
+        setScannerOpen(false);
+        return;
+      }
+
+      // Scanner for Cart (Daily Sell)
+      const q = trimmed.toLowerCase();
+      const medicine = medicines.find(
+        (m) =>
+          (m.barcode && m.barcode.toLowerCase() === q) ||
+          (m.batchNo && m.batchNo.toLowerCase() === q) ||
+          m.id.toLowerCase() === q ||
+          m.name.toLowerCase() === q,
+      );
+
+      if (!medicine) {
+        playScanBeep(false);
+        setScanFeedback({
+          text: `No medicine found for barcode "${trimmed}"`,
+          isError: true,
+        });
+        setCartError(`No medicine found matching "${trimmed}"`);
+        return;
+      }
+
+      if (medicine.quantity <= 0) {
+        playScanBeep(false);
+        setScanFeedback({
+          text: `"${medicine.name}" is OUT OF STOCK (0 available)`,
+          isError: true,
+        });
+        setCartError(`"${medicine.name}" is out of stock.`);
+        return;
+      }
+
+      // Add to cart state
+      setCartItems((prev) => {
+        const existingIdx = prev.findIndex((i) => i.medicineId === medicine.id);
+        if (existingIdx >= 0) {
+          const currentQty = prev[existingIdx].quantity;
+          if (currentQty + 1 > medicine.quantity) {
+            playScanBeep(false);
+            setScanFeedback({
+              text: `Stock limit reached for "${medicine.name}" (${medicine.quantity} max)`,
+              isError: true,
+            });
+            setCartError(
+              `Cannot add more "${medicine.name}". Total available: ${medicine.quantity}`,
+            );
+            return prev;
+          }
+
+          playScanBeep(true);
+          const nextQty = currentQty + 1;
+          setScanFeedback({
+            text: `Added +1 "${medicine.name}" (Cart: ${nextQty}x)`,
+            isError: false,
+          });
+          setCartError("");
+          const updated = [...prev];
+          updated[existingIdx] = {
+            ...prev[existingIdx],
+            quantity: nextQty,
+            totalPrice: nextQty * medicine.sellingPrice,
+          };
+          return updated;
+        } else {
+          playScanBeep(true);
+          setScanFeedback({
+            text: `Added "${medicine.name}" to cart ($${medicine.sellingPrice.toFixed(2)})`,
+            isError: false,
+          });
+          setCartError("");
+          return [
+            ...prev,
+            {
+              medicineId: medicine.id,
+              medicineName: medicine.name,
+              batchNo: medicine.batchNo,
+              quantity: 1,
+              unitPrice: medicine.sellingPrice,
+              totalPrice: medicine.sellingPrice,
+            },
+          ];
+        }
+      });
+    },
+    [medicines, scannerContext],
+  );
 
   const navItems: {
     key: Page;
@@ -1570,10 +1708,15 @@ const cartGrandTotal = useMemo(
                             <td className="py-2.5 pr-4">
                               <div className="font-medium">{m.name}</div>
                               <div
-                                className="text-xs font-mono"
+                                className="text-xs font-mono flex items-center gap-2 flex-wrap"
                                 style={{ color: theme.inkSoft }}
                               >
-                                {m.batchNo}
+                                <span>{m.batchNo || "N/A"}</span>
+                                {m.barcode && (
+                                  <span className="inline-flex items-center gap-1 opacity-80 text-[11px] px-1.5 py-0.2 rounded bg-black/5 dark:bg-white/5">
+                                    <Barcode size={12} /> {m.barcode}
+                                  </span>
+                                )}
                               </div>
                             </td>
                             <td className="py-2.5 pr-4">{m.category}</td>
@@ -1620,14 +1763,23 @@ const cartGrandTotal = useMemo(
                               Pkr {m.sellingPrice.toFixed(2)}
                             </td>
                             <td className="py-2.5 pr-4">
-                              {status === "expired" && (
-                                <Pill tone="red">{m.expiryDate}</Pill>
-                              )}
-                              {status === "soon" && (
-                                <Pill tone="amber">{m.expiryDate}</Pill>
-                              )}
-                              {status === "fresh" && (
-                                <span>{m.expiryDate}</span>
+                              {m.expiryDate ? (
+                                <>
+                                  {status === "expired" && (
+                                    <Pill tone="red">{m.expiryDate}</Pill>
+                                  )}
+                                  {status === "soon" && (
+                                    <Pill tone="amber">{m.expiryDate}</Pill>
+                                  )}
+                                  {status === "fresh" && (
+                                    <span>{m.expiryDate}</span>
+                                  )}
+                                  {status === "none" && (
+                                    <span>{m.expiryDate}</span>
+                                  )}
+                                </>
+                              ) : (
+                                <span style={{ color: theme.inkSoft }}>—</span>
                               )}
                             </td>
                             <td className="py-2.5 pr-4">
@@ -1680,24 +1832,90 @@ const cartGrandTotal = useMemo(
             {/* Form View */}
             {page === "add" && !loading && (
               <LabelCard className="max-w-full">
+                <div className="mb-4 pb-3 border-b" style={{ borderColor: theme.line }}>
+                  <h2 className="text-base sm:text-lg font-bold font-space flex items-center gap-2">
+                    <PlusCircle size={18} style={{ color: palette.mintDeep }} />
+                    {draft.id ? "Edit Medicine" : "Add New Medicine"}
+                  </h2>
+                  <p className="text-xs mt-0.5" style={{ color: theme.inkSoft }}>
+                    Only <strong>Medicine Name</strong> is required. All other fields are optional.
+                  </p>
+                </div>
+
                 <form
                   onSubmit={saveDraft}
                   className="grid sm:grid-cols-2 gap-4"
                 >
                   <Field
                     label="Medicine Name"
+                    required
+                    placeholder="e.g. PANADOL 500MG"
                     value={draft.name}
                     onChange={(v: string) =>
                       setDraft({ ...draft, name: v.toUpperCase() })
                     }
                   />
+
+                  {/* Barcode Field with Camera Scan Button */}
                   <div>
-                    <label
-                      className="text-xs font-mono uppercase"
-                      style={{ color: theme.inkSoft }}
-                    >
-                      Category
-                    </label>
+                    <div className="flex items-center justify-between">
+                      <label
+                        className="text-xs font-mono uppercase flex items-center gap-1.5"
+                        style={{ color: theme.inkSoft }}
+                      >
+                        <span>Barcode / QR Code</span>
+                        <span className="text-[10px] opacity-60 font-sans normal-case">
+                          (Optional)
+                        </span>
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setScannerContext("draft");
+                          setScanFeedback(null);
+                          setScannerOpen(true);
+                        }}
+                        className="inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-md transition-colors"
+                        style={{
+                          backgroundColor: `${palette.mintDeep}15`,
+                          color: palette.mintDeep,
+                        }}
+                        title="Scan barcode with camera"
+                      >
+                        <Camera size={13} />
+                        <span>Scan Camera</span>
+                      </button>
+                    </div>
+                    <div className="relative mt-1 flex items-center">
+                      <input
+                        type="text"
+                        value={draft.barcode}
+                        placeholder="Scan or enter barcode / QR code"
+                        onChange={(e) =>
+                          setDraft({ ...draft, barcode: e.target.value.trim() })
+                        }
+                        className="w-full px-3 py-2 rounded-lg text-sm outline-none font-mono"
+                        style={{
+                          backgroundColor: theme.bg,
+                          border: `1px solid ${theme.line}`,
+                          color: theme.ink,
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <label
+                        className="text-xs font-mono uppercase flex items-center gap-1.5"
+                        style={{ color: theme.inkSoft }}
+                      >
+                        <span>Category</span>
+                        <span className="text-[10px] opacity-60 font-sans normal-case">
+                          (Optional)
+                        </span>
+                      </label>
+                    </div>
                     <select
                       value={draft.category}
                       onChange={(e) =>
@@ -1732,8 +1950,10 @@ const cartGrandTotal = useMemo(
                       />
                     )}
                   </div>
+
                   <Field
                     label="Batch Number"
+                    placeholder="e.g. B-1029 (defaults to N/A)"
                     value={draft.batchNo}
                     onChange={(v: string) =>
                       setDraft({ ...draft, batchNo: v.toUpperCase() })
@@ -1743,6 +1963,7 @@ const cartGrandTotal = useMemo(
                   <Field
                     label="Quantity"
                     type="number"
+                    placeholder="0"
                     value={draft.quantity}
                     onChange={(v: string) =>
                       setDraft({ ...draft, quantity: v })
@@ -1751,6 +1972,7 @@ const cartGrandTotal = useMemo(
                   <Field
                     label="Buying Price"
                     type="number"
+                    placeholder="0.00"
                     value={draft.purchasePrice}
                     onChange={(v: string) =>
                       setDraft({ ...draft, purchasePrice: v })
@@ -1759,6 +1981,7 @@ const cartGrandTotal = useMemo(
                   <Field
                     label="Selling Price"
                     type="number"
+                    placeholder="0.00"
                     value={draft.sellingPrice}
                     onChange={(v: string) =>
                       setDraft({ ...draft, sellingPrice: v })
@@ -1768,6 +1991,7 @@ const cartGrandTotal = useMemo(
                     <Field
                       label="Buying Discount (%)"
                       type="number"
+                      placeholder="0"
                       value={draft.buyingDiscount}
                       onChange={(v: string) =>
                         setDraft({ ...draft, buyingDiscount: v })
@@ -1794,6 +2018,7 @@ const cartGrandTotal = useMemo(
                   </div>
                   <Field
                     label="Supplier"
+                    placeholder="e.g. Medico Pharma"
                     value={draft.supplier}
                     onChange={(v: string) =>
                       setDraft({ ...draft, supplier: v })
@@ -1877,14 +2102,33 @@ const cartGrandTotal = useMemo(
               <div className="grid lg:grid-cols-2 gap-6">
                 {/* ── Cart / Bulk Sell Form ── */}
                 <LabelCard>
-                  <div className="flex items-center gap-2 mb-4">
-                    <ShoppingCart
-                      size={18}
-                      style={{ color: palette.mintDeep }}
-                    />
-                    <h2 className="font-semibold font-space">
-                      New Sale (Bulk)
-                    </h2>
+                  <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
+                    <div className="flex items-center gap-2">
+                      <ShoppingCart
+                        size={18}
+                        style={{ color: palette.mintDeep }}
+                      />
+                      <h2 className="font-semibold font-space">
+                        New Sale (Bulk)
+                      </h2>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setScannerContext("cart");
+                        setScanFeedback(null);
+                        setScannerOpen(true);
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold shadow-xs transition-transform active:scale-95"
+                      style={{
+                        backgroundColor: palette.mintDeep,
+                        color: "#fff",
+                      }}
+                      title="Open Live Camera Scanner to scan medicines into cart"
+                    >
+                      <Camera size={14} />
+                      <span>Scan Barcode</span>
+                    </button>
                   </div>
 
                   {sellSuccess && (
@@ -1899,6 +2143,64 @@ const cartGrandTotal = useMemo(
                       {sellSuccess}
                     </div>
                   )}
+
+                  {/* Quick Barcode Scan / Handheld Scanner Input */}
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      if (quickScanInput.trim()) {
+                        handleScanMedicine(quickScanInput.trim());
+                        setQuickScanInput("");
+                      }
+                    }}
+                    className="flex items-center gap-2 mb-3 p-2 rounded-xl"
+                    style={{
+                      backgroundColor: theme.bg,
+                      border: `1px solid ${theme.line}`,
+                    }}
+                  >
+                    <div
+                      className="p-1.5 rounded-lg flex-shrink-0"
+                      style={{
+                        backgroundColor: `${palette.mintDeep}15`,
+                        color: palette.mintDeep,
+                      }}
+                    >
+                      <ScanLine size={16} />
+                    </div>
+                    <input
+                      type="text"
+                      value={quickScanInput}
+                      onChange={(e) => setQuickScanInput(e.target.value)}
+                      placeholder="Scan barcode or type & press Enter..."
+                      className="flex-1 bg-transparent text-xs sm:text-sm outline-none font-mono min-w-0"
+                      style={{ color: theme.ink }}
+                    />
+                    <button
+                      type="submit"
+                      disabled={!quickScanInput.trim()}
+                      className="px-3 py-1.5 rounded-lg text-xs font-semibold disabled:opacity-40 transition-colors flex-shrink-0"
+                      style={{
+                        backgroundColor: palette.mintDeep,
+                        color: "#fff",
+                      }}
+                    >
+                      Add to Cart
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setScannerContext("cart");
+                        setScanFeedback(null);
+                        setScannerOpen(true);
+                      }}
+                      className="p-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 transition-colors flex-shrink-0"
+                      style={{ color: palette.mintDeep }}
+                      title="Open Live Camera Scanner"
+                    >
+                      <Camera size={16} />
+                    </button>
+                  </form>
 
                   {/* Add to Cart Row */}
                   <div
@@ -1995,7 +2297,7 @@ const cartGrandTotal = useMemo(
                                     className="px-3 py-3 text-sm"
                                     style={{ color: theme.inkSoft }}
                                   >
-                                    No medicines match "{cartSearch}".
+                                    No medicines match {cartSearch}.
                                   </div>
                                 ) : (
                                   cartFilteredMedicines.map((m) => {
@@ -3161,6 +3463,33 @@ const cartGrandTotal = useMemo(
                 </div>
               </div>
             )}
+
+            {/* Camera Barcode & QR Scanner Modal */}
+            <CameraScannerModal
+              isOpen={scannerOpen}
+              onClose={() => {
+                setScannerOpen(false);
+                setScanFeedback(null);
+              }}
+              onScanSuccess={handleScanMedicine}
+              title={
+                scannerContext === "draft"
+                  ? "Scan Medicine Barcode"
+                  : "Scan to Add to Cart"
+              }
+              subtitle={
+                scannerContext === "draft"
+                  ? "Align the barcode on the medicine package within the box"
+                  : "Align any medicine barcode or QR code to immediately add to cart"
+              }
+              continuousMode={
+                scannerContext === "cart" ? continuousScanMode : false
+              }
+              onToggleContinuousMode={
+                scannerContext === "cart" ? setContinuousScanMode : undefined
+              }
+              recentScanFeedback={scanFeedback}
+            />
           </main>
         </div>
       </div>
@@ -3175,6 +3504,8 @@ function Field({
   type = "text",
   mono = false,
   placeholder = "",
+  required = false,
+  actionButton,
 }: {
   label: string;
   value: string | number;
@@ -3182,15 +3513,29 @@ function Field({
   type?: string;
   mono?: boolean;
   placeholder?: string;
+  required?: boolean;
+  actionButton?: React.ReactNode;
 }) {
   return (
     <div>
-      <label
-        className="text-xs font-mono uppercase"
-        style={{ color: "#3E5850" }}
-      >
-        {label}
-      </label>
+      <div className="flex items-center justify-between">
+        <label
+          className="text-xs font-mono uppercase flex items-center gap-1.5"
+          style={{ color: "#3E5850" }}
+        >
+          <span>{label}</span>
+          {required ? (
+            <span className="text-[10px] px-1.5 py-0.2 rounded font-semibold text-[#8C332A] bg-[#F1D9D3]">
+              Required
+            </span>
+          ) : (
+            <span className="text-[10px] opacity-60 font-sans normal-case">
+              (Optional)
+            </span>
+          )}
+        </label>
+        {actionButton}
+      </div>
       <input
         type={type}
         value={value}

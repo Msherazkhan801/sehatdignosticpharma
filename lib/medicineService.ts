@@ -32,8 +32,15 @@ export async function listMedicines(): Promise<Medicine[]> {
       id: item.id,
       ...data,
       name: data.name?.toUpperCase() ?? "",
-      batchNo: data.batchNo?.toUpperCase() ?? "",
+      category: data.category ?? "General",
+      batchNo: data.batchNo?.toUpperCase() ?? "N/A",
+      quantity: Number(data.quantity) || 0,
+      purchasePrice: Number(data.purchasePrice) || 0,
+      sellingPrice: Number(data.sellingPrice) || 0,
       buyingDiscount: Number(data.buyingDiscount) || 0,
+      supplier: data.supplier ?? "",
+      expiryDate: data.expiryDate ?? "",
+      barcode: data.barcode ?? "",
     };
   });
 }
@@ -48,8 +55,21 @@ export async function createMedicine(medicine: Omit<Medicine, "id">): Promise<Me
     throw new Error("Firestore is unavailable.");
   }
 
-  const docRef = await addDoc(collection(db, COLLECTION_NAME), medicine);
-  return { id: docRef.id, ...medicine };
+  const payload = {
+    name: medicine.name,
+    category: medicine.category || "General",
+    batchNo: medicine.batchNo || "N/A",
+    quantity: Number(medicine.quantity) || 0,
+    purchasePrice: Number(medicine.purchasePrice) || 0,
+    sellingPrice: Number(medicine.sellingPrice) || 0,
+    buyingDiscount: Number(medicine.buyingDiscount) || 0,
+    supplier: medicine.supplier || "",
+    expiryDate: medicine.expiryDate || "",
+    barcode: medicine.barcode || "",
+  };
+
+  const docRef = await addDoc(collection(db, COLLECTION_NAME), payload);
+  return { id: docRef.id, ...payload };
 }
 
 export async function updateMedicine(medicine: Medicine): Promise<Medicine> {
@@ -63,19 +83,21 @@ export async function updateMedicine(medicine: Medicine): Promise<Medicine> {
   }
 
   const target = doc(db, COLLECTION_NAME, medicine.id);
-  await updateDoc(target, {
+  const payload = {
     name: medicine.name,
-    category: medicine.category,
-    batchNo: medicine.batchNo,
-    quantity: medicine.quantity,
-    purchasePrice: medicine.purchasePrice,
-    sellingPrice: medicine.sellingPrice,
-    buyingDiscount: medicine.buyingDiscount,
-    supplier: medicine.supplier,
-    expiryDate: medicine.expiryDate,
-  });
+    category: medicine.category || "General",
+    batchNo: medicine.batchNo || "N/A",
+    quantity: Number(medicine.quantity) || 0,
+    purchasePrice: Number(medicine.purchasePrice) || 0,
+    sellingPrice: Number(medicine.sellingPrice) || 0,
+    buyingDiscount: Number(medicine.buyingDiscount) || 0,
+    supplier: medicine.supplier || "",
+    expiryDate: medicine.expiryDate || "",
+    barcode: medicine.barcode || "",
+  };
+  await updateDoc(target, payload);
 
-  return medicine;
+  return { id: medicine.id, ...payload };
 }
 
 export async function deleteMedicine(id: string): Promise<void> {

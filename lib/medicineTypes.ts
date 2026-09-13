@@ -9,6 +9,7 @@ export interface Medicine {
   buyingDiscount: number;
   supplier: string;
   expiryDate: string;
+  barcode?: string;
 }
 
 export interface Draft {
@@ -22,6 +23,7 @@ export interface Draft {
   buyingDiscount: string;
   supplier: string;
   expiryDate: string;
+  barcode: string;
 }
 
 export interface CartItem {
