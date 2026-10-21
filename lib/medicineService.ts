@@ -113,7 +113,7 @@ export async function deleteMedicine(id: string): Promise<void> {
   await deleteDoc(doc(db, COLLECTION_NAME, id));
 }
 
-// ─── Sales ──────────────────────────────────────────────────────────────────
+// ─── Sales ──────────────────────────────────────────────-────────────────────
 
 export async function recordSale(
   sale: Omit<Sale, "id">
