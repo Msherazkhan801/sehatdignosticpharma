@@ -145,6 +145,39 @@ function effectiveCost(purchasePrice: number, buyingDiscount: number): number {
   return Math.max((Number(purchasePrice) || 0) * (1 - discount / 100), 0);
 }
 
+/** Calculate line item gross, discount amount, and net total price. */
+function calculateItemTotals(
+  quantity: number,
+  unitPrice: number,
+  discount: number = 0,
+  discountType: "percent" | "amount" = "percent",
+) {
+  const qty = Math.max(Number(quantity) || 0, 0);
+  const price = Math.max(Number(unitPrice) || 0, 0);
+  const gross = Math.round(qty * price * 100) / 100;
+  const disc = Math.max(Number(discount) || 0, 0);
+
+  let discountAmount = 0;
+  if (disc > 0) {
+    if (discountType === "percent") {
+      const pct = Math.min(Math.max(disc, 0), 100);
+      discountAmount = (gross * pct) / 100;
+    } else {
+      discountAmount = Math.min(disc, gross);
+    }
+  }
+  discountAmount = Math.round(discountAmount * 100) / 100;
+  const totalPrice = Math.round(Math.max(gross - discountAmount, 0) * 100) / 100;
+
+  return {
+    gross,
+    discount: disc > 0 ? disc : undefined,
+    discountType: disc > 0 ? discountType : undefined,
+    discountAmount: discountAmount > 0 ? discountAmount : 0,
+    totalPrice,
+  };
+}
+
 /** Convert "beauty cream" -> "Beauty Cream" for clean custom categories. */
 function toTitleCase(str: string): string {
   return str
@@ -312,9 +345,9 @@ export default function OkPharmacyApp(): React.ReactElement {
   const [saleFromDate, setSaleFromDate] = useState<string>(todayIso);
   const [saleToDate, setSaleToDate] = useState<string>(todayIso);
 
-  // Customer discount applied on the cart bill
-  const [cartDiscount, setCartDiscount] = useState<string>("");
-  const [cartDiscountType, setCartDiscountType] = useState<
+  // Per-item discount for the item being added to cart
+  const [itemDiscount, setItemDiscount] = useState<string>("");
+  const [itemDiscountType, setItemDiscountType] = useState<
     "percent" | "amount"
   >("percent");
 
@@ -427,15 +460,22 @@ export default function OkPharmacyApp(): React.ReactElement {
 
       if (items) {
         // ── Bulk / multi-item sale ────────────────────────────────────────
-        // Subtotal = sum of line totals before any customer discount.
-        const subtotal =
+        // Check if items have individual discounts or legacy cart discount
+        const hasItemDiscounts = items.some(
+          (i) => (i.discountAmount || 0) > 0 || (i.discount || 0) > 0,
+        );
+        const grossSubtotal =
           sale.subtotal && sale.subtotal > 0
             ? sale.subtotal
-            : items.reduce((s, i) => s + (i.totalPrice || 0), 0);
-        // Factor that proportionally allocates the customer discount across
-        // each line item (revenue collected = totalPrice after discount).
+            : items.reduce(
+                (s, i) => s + (i.unitPrice * i.quantity || i.totalPrice || 0),
+                0,
+              );
+        // For legacy sales with cart-level discount and no per-item discount:
         const discountFactor =
-          subtotal > 0 ? (sale.totalPrice || 0) / subtotal : 1;
+          !hasItemDiscounts && (sale.discountAmount || 0) > 0 && grossSubtotal > 0
+            ? (sale.totalPrice || 0) / grossSubtotal
+            : 1;
 
         for (const item of items) {
           const med = medicines.find((m) => m.id === item.medicineId);
@@ -445,8 +485,8 @@ export default function OkPharmacyApp(): React.ReactElement {
           const itemReturned = Number(item.returnedQuantity) || 0;
           const itemEffectiveQty = Math.max(itemQty - itemReturned, 0);
 
-          // Revenue share = this line's billed amount (after customer
-          // discount allocation), prorated for returned quantity.
+          // Revenue share = this line's billed amount (item.totalPrice is already after item discount),
+          // prorated for returned quantity.
           revenue +=
             (item.totalPrice || 0) *
             discountFactor *
@@ -567,25 +607,29 @@ export default function OkPharmacyApp(): React.ReactElement {
     });
   }, [medicines, search, categoryFilter]);
 
-  // Cart totals (subtotal, customer discount, grand total)
+  // Cart totals (gross subtotal, total item discounts, net grand total)
   const cartSubtotal = useMemo(
-    () => cartItems.reduce((sum, i) => sum + i.totalPrice, 0),
+    () =>
+      Math.round(
+        cartItems.reduce((sum, i) => sum + i.quantity * i.unitPrice, 0) * 100,
+      ) / 100,
     [cartItems],
   );
 
-  const cartDiscountAmount = useMemo(() => {
-    const dv = Number(cartDiscount) || 0;
-    if (dv <= 0) return 0;
-    const da =
-      cartDiscountType === "percent"
-        ? cartSubtotal * (Math.min(Math.max(dv, 0), 100) / 100)
-        : dv;
-    return Math.min(Math.max(da, 0), cartSubtotal);
-  }, [cartDiscount, cartDiscountType, cartSubtotal]);
+  const cartTotalDiscount = useMemo(
+    () =>
+      Math.round(
+        cartItems.reduce((sum, i) => sum + (i.discountAmount || 0), 0) * 100,
+      ) / 100,
+    [cartItems],
+  );
 
-const cartGrandTotal = useMemo(
-    () => Math.max(cartSubtotal - cartDiscountAmount, 0),
-    [cartSubtotal, cartDiscountAmount],
+  const cartGrandTotal = useMemo(
+    () =>
+      Math.round(
+        cartItems.reduce((sum, i) => sum + i.totalPrice, 0) * 100,
+      ) / 100,
+    [cartItems],
   );
 
   // Medicines filtered by the search query in the cart's medicine dropdown.
@@ -839,19 +883,33 @@ const cartGrandTotal = useMemo(
           });
           setCartError("");
           const updated = [...prev];
+          const currentItem = prev[existingIdx];
+          const { discountAmount, totalPrice } = calculateItemTotals(
+            nextQty,
+            medicine.sellingPrice,
+            currentItem.discount || 0,
+            currentItem.discountType || "percent",
+          );
           updated[existingIdx] = {
-            ...prev[existingIdx],
+            ...currentItem,
             quantity: nextQty,
-            totalPrice: nextQty * medicine.sellingPrice,
+            discountAmount,
+            totalPrice,
           };
           return updated;
         } else {
           playScanBeep(true);
           setScanFeedback({
-            text: `Added "${medicine.name}" to cart ($${medicine.sellingPrice.toFixed(2)})`,
+            text: `Added "${medicine.name}" to cart (Rs${medicine.sellingPrice.toFixed(2)})`,
             isError: false,
           });
           setCartError("");
+          const { discountAmount, totalPrice } = calculateItemTotals(
+            1,
+            medicine.sellingPrice,
+            0,
+            "percent",
+          );
           return [
             ...prev,
             {
@@ -860,7 +918,10 @@ const cartGrandTotal = useMemo(
               batchNo: medicine.batchNo,
               quantity: 1,
               unitPrice: medicine.sellingPrice,
-              totalPrice: medicine.sellingPrice,
+              discount: 0,
+              discountType: "percent",
+              discountAmount,
+              totalPrice,
             },
           ];
         }
@@ -907,41 +968,124 @@ const cartGrandTotal = useMemo(
       return;
     }
 
+    const disc = Number(itemDiscount) || 0;
+    const discType = itemDiscountType;
+
     // Check if medicine already in cart
     const existingIndex = cartItems.findIndex(
       (item) => item.medicineId === medicine.id,
     );
     if (existingIndex >= 0) {
       // Update existing item
-      const updated = [...cartItems];
-      const newQty = updated[existingIndex].quantity + qty;
+      const existing = cartItems[existingIndex];
+      const newQty = existing.quantity + qty;
       if (newQty > medicine.quantity) {
         setCartError(
           `Total quantity (${newQty}) exceeds stock (${medicine.quantity}).`,
         );
         return;
       }
+      const effectiveDisc = disc > 0 ? disc : (existing.discount || 0);
+      const effectiveDiscType =
+        disc > 0 ? discType : (existing.discountType || "percent");
+      const { discountAmount, totalPrice } = calculateItemTotals(
+        newQty,
+        medicine.sellingPrice,
+        effectiveDisc,
+        effectiveDiscType,
+      );
+
+      const updated = [...cartItems];
       updated[existingIndex] = {
-        ...updated[existingIndex],
+        ...existing,
         quantity: newQty,
-        totalPrice: newQty * medicine.sellingPrice,
+        discount: effectiveDisc > 0 ? effectiveDisc : undefined,
+        discountType: effectiveDisc > 0 ? effectiveDiscType : undefined,
+        discountAmount,
+        totalPrice,
       };
       setCartItems(updated);
     } else {
-      // Add new item
+      // Add new item with item discount
+      const { discountAmount, totalPrice } = calculateItemTotals(
+        qty,
+        medicine.sellingPrice,
+        disc,
+        discType,
+      );
       const newItem: CartItem = {
         medicineId: medicine.id,
         medicineName: medicine.name,
         batchNo: medicine.batchNo,
         quantity: qty,
         unitPrice: medicine.sellingPrice,
-        totalPrice: qty * medicine.sellingPrice,
+        discount: disc > 0 ? disc : undefined,
+        discountType: disc > 0 ? discType : undefined,
+        discountAmount,
+        totalPrice,
       };
       setCartItems([...cartItems, newItem]);
     }
 
     setCartMedicineId("");
     setCartQuantity("1");
+    setItemDiscount("");
+  }
+
+  function handleUpdateCartItemDiscount(
+    medicineId: string,
+    discountVal: number,
+    discountType: "percent" | "amount",
+  ) {
+    setCartItems((prev) =>
+      prev.map((item) => {
+        if (item.medicineId !== medicineId) return item;
+        const disc = Math.max(discountVal || 0, 0);
+        const { discountAmount, totalPrice } = calculateItemTotals(
+          item.quantity,
+          item.unitPrice,
+          disc,
+          discountType,
+        );
+        return {
+          ...item,
+          discount: disc > 0 ? disc : undefined,
+          discountType: disc > 0 ? discountType : undefined,
+          discountAmount,
+          totalPrice,
+        };
+      }),
+    );
+  }
+
+  function handleUpdateCartItemQuantity(medicineId: string, newQty: number) {
+    if (newQty <= 0) {
+      handleRemoveCartItem(medicineId);
+      return;
+    }
+    const med = medicines.find((m) => m.id === medicineId);
+    if (med && newQty > med.quantity) {
+      setCartError(`Cannot exceed available stock (${med.quantity}).`);
+      return;
+    }
+    setCartError("");
+    setCartItems((prev) =>
+      prev.map((item) => {
+        if (item.medicineId !== medicineId) return item;
+        const { discountAmount, totalPrice } = calculateItemTotals(
+          newQty,
+          item.unitPrice,
+          item.discount || 0,
+          item.discountType || "percent",
+        );
+        return {
+          ...item,
+          quantity: newQty,
+          discountAmount,
+          totalPrice,
+        };
+      }),
+    );
   }
 
   function handleRemoveCartItem(medicineId: string) {
@@ -960,27 +1104,11 @@ const cartGrandTotal = useMemo(
       return;
     }
 
-    const subtotal = cartItems.reduce((sum, i) => sum + i.totalPrice, 0);
-    const discountVal = Number(cartDiscount) || 0;
-    let discountAmount = 0;
-    if (discountVal > 0) {
-      if (cartDiscountType === "percent") {
-        discountAmount =
-          subtotal * (Math.min(Math.max(discountVal, 0), 100) / 100);
-      } else {
-        discountAmount = discountVal;
-      }
-    }
-
     setProcessingSale(true);
     try {
       const newSale = await recordBulkSale({
         customerName: cartCustomerName || "Walk-in Customer",
         items: cartItems,
-        discount: discountVal > 0 ? discountVal : undefined,
-        discountType: discountVal > 0 ? cartDiscountType : undefined,
-        discountAmount:
-          discountAmount > 0 ? Math.min(discountAmount, subtotal) : undefined,
       });
 
       // Update local stock
@@ -998,8 +1126,8 @@ const cartGrandTotal = useMemo(
       setShowReceipt(true);
       setCartItems([]);
       setCartCustomerName("");
-      setCartDiscount("");
-      setCartDiscountType("percent");
+      setItemDiscount("");
+      setItemDiscountType("percent");
       setSellSuccess(`Sale completed! ${cartItems.length} item(s) sold.`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Sale failed.";
@@ -2210,8 +2338,8 @@ const cartGrandTotal = useMemo(
                       border: `1px solid ${theme.line}`,
                     }}
                   >
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-<div className="sm:col-span-1">
+                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
+                      <div className="sm:col-span-5">
                         <label
                           className="text-xs font-mono uppercase"
                           style={{ color: palette.inkSoft }}
@@ -2347,7 +2475,7 @@ const cartGrandTotal = useMemo(
                           )}
                         </div>
                       </div>
-                      <div>
+                      <div className="sm:col-span-2">
                         <label
                           className="text-xs font-mono uppercase"
                           style={{ color: palette.inkSoft }}
@@ -2367,7 +2495,59 @@ const cartGrandTotal = useMemo(
                           }}
                         />
                       </div>
-                      <div className="flex items-end">
+                      <div className="sm:col-span-2">
+                        <div className="flex items-center justify-between">
+                          <label
+                            className="text-xs font-mono uppercase"
+                            style={{ color: palette.inkSoft }}
+                          >
+                            Disc
+                          </label>
+                          <div className="flex items-center gap-0.5 text-[10px] font-semibold">
+                            <button
+                              type="button"
+                              onClick={() => setItemDiscountType("percent")}
+                              className={`px-1 py-0.5 rounded ${itemDiscountType === "percent" ? "font-bold" : "opacity-60"}`}
+                              style={{
+                                color:
+                                  itemDiscountType === "percent"
+                                    ? palette.mintDeep
+                                    : theme.inkSoft,
+                              }}
+                            >
+                              %
+                            </button>
+                            <span style={{ color: theme.line }}>/</span>
+                            <button
+                              type="button"
+                              onClick={() => setItemDiscountType("amount")}
+                              className={`px-1 py-0.5 rounded ${itemDiscountType === "amount" ? "font-bold" : "opacity-60"}`}
+                              style={{
+                                color:
+                                  itemDiscountType === "amount"
+                                    ? palette.mintDeep
+                                    : theme.inkSoft,
+                              }}
+                            >
+                              Rs
+                            </button>
+                          </div>
+                        </div>
+                        <input
+                          type="number"
+                          min="0"
+                          placeholder="0"
+                          value={itemDiscount}
+                          onChange={(e) => setItemDiscount(e.target.value)}
+                          className="w-full mt-1 px-3 py-2 rounded-lg text-sm outline-none font-mono"
+                          style={{
+                            backgroundColor: theme.bg,
+                            border: `1px solid ${theme.line}`,
+                            color: theme.ink,
+                          }}
+                        />
+                      </div>
+                      <div className="sm:col-span-3 flex items-end">
                         <button
                           type="button"
                           onClick={handleAddToCart}
@@ -2388,15 +2568,43 @@ const cartGrandTotal = useMemo(
                         const med = medicines.find(
                           (m) => m.id === cartMedicineId,
                         );
-                        return med ? (
+                        if (!med) return null;
+                        const qty = Number(cartQuantity) || 1;
+                        const disc = Number(itemDiscount) || 0;
+                        const { discountAmount, totalPrice } =
+                          calculateItemTotals(
+                            qty,
+                            med.sellingPrice,
+                            disc,
+                            itemDiscountType,
+                          );
+                        return (
                           <div
-                            className="text-xs"
+                            className="flex items-center justify-between text-xs pt-1 flex-wrap gap-1"
                             style={{ color: palette.inkSoft }}
                           >
-                            Price: ${med.sellingPrice.toFixed(2)} / unit
-                            &middot; Available: {med.quantity}
+                            <span>
+                              Price: Rs{med.sellingPrice.toFixed(2)} / unit &middot; Available: {med.quantity}
+                            </span>
+                            <span className="font-mono">
+                              {discountAmount > 0 ? (
+                                <span>
+                                  <span className="line-through mr-1 opacity-70">
+                                    Rs{(qty * med.sellingPrice).toFixed(2)}
+                                  </span>
+                                  <span
+                                    className="font-semibold"
+                                    style={{ color: palette.mintDeep }}
+                                  >
+                                    Rs{totalPrice.toFixed(2)} (-Rs{discountAmount.toFixed(2)})
+                                  </span>
+                                </span>
+                              ) : (
+                                <span>Total: Rs{totalPrice.toFixed(2)}</span>
+                              )}
+                            </span>
                           </div>
-                        ) : null;
+                        );
                       })()}
                   </div>
 
@@ -2413,117 +2621,230 @@ const cartGrandTotal = useMemo(
                         {cartItems.map((item) => (
                           <div
                             key={item.medicineId}
-                            className="flex items-center justify-between p-2 rounded-lg text-sm"
+                            className="p-2.5 rounded-xl text-sm transition-all"
                             style={{
                               backgroundColor: theme.bg,
                               border: `1px solid ${theme.line}`,
                             }}
                           >
-                            <div className="flex-1 min-w-0">
-                              <div className="font-medium truncate">
-                                {item.medicineName}
+                            {/* Top row: Medicine info & Remove button */}
+                            <div className="flex items-start justify-between gap-2 mb-1.5">
+                              <div className="min-w-0 flex-1">
+                                <div
+                                  className="font-medium truncate"
+                                  style={{ color: theme.ink }}
+                                >
+                                  {item.medicineName}
+                                </div>
+                                <div
+                                  className="text-xs font-mono"
+                                  style={{ color: theme.inkSoft }}
+                                >
+                                  Rs{item.unitPrice.toFixed(2)} / unit &middot; Batch: {item.batchNo}
+                                </div>
                               </div>
-                              <div
-                                className="text-xs font-mono"
-                                style={{ color: theme.inkSoft }}
-                              >
-                                {item.quantity} × ${item.unitPrice.toFixed(2)}
-                              </div>
-                            </div>
-                            <div className="flex items-center gap-2 ml-2">
-                              <span
-                                className="font-mono font-bold text-sm"
-                                style={{ color: palette.mintDeep }}
-                              >
-                                ${item.totalPrice.toFixed(2)}
-                              </span>
                               <button
+                                type="button"
                                 onClick={() =>
                                   handleRemoveCartItem(item.medicineId)
                                 }
-                                className="p-1 rounded-full"
+                                className="p-1 rounded-full hover:opacity-80 transition-colors flex-shrink-0"
                                 style={{
                                   backgroundColor: palette.redSoft,
                                   color: "#8C332A",
                                 }}
+                                title="Remove item"
                               >
                                 <Trash2 size={12} />
                               </button>
                             </div>
+
+                            {/* Controls row: Quantity stepper, Per-item discount, and Line Total */}
+                            <div
+                              className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t"
+                              style={{ borderColor: theme.line }}
+                            >
+                              {/* Quantity stepper */}
+                              <div className="flex items-center gap-1">
+                                <span
+                                  className="text-xs font-mono uppercase mr-0.5"
+                                  style={{ color: theme.inkSoft }}
+                                >
+                                  Qty:
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleUpdateCartItemQuantity(
+                                      item.medicineId,
+                                      item.quantity - 1,
+                                    )
+                                  }
+                                  className="w-6 h-6 rounded flex items-center justify-center font-bold text-xs"
+                                  style={{
+                                    backgroundColor: theme.line,
+                                    color: theme.ink,
+                                  }}
+                                  title="Decrease quantity"
+                                >
+                                  -
+                                </button>
+                                <input
+                                  type="number"
+                                  min="1"
+                                  value={item.quantity}
+                                  onChange={(e) =>
+                                    handleUpdateCartItemQuantity(
+                                      item.medicineId,
+                                      parseInt(e.target.value) || 1,
+                                    )
+                                  }
+                                  className="w-12 text-center text-xs font-mono font-semibold py-0.5 rounded outline-none"
+                                  style={{
+                                    backgroundColor: "#fff",
+                                    border: `1px solid ${theme.line}`,
+                                    color: theme.ink,
+                                  }}
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleUpdateCartItemQuantity(
+                                      item.medicineId,
+                                      item.quantity + 1,
+                                    )
+                                  }
+                                  className="w-6 h-6 rounded flex items-center justify-center font-bold text-xs"
+                                  style={{
+                                    backgroundColor: theme.line,
+                                    color: theme.ink,
+                                  }}
+                                  title="Increase quantity"
+                                >
+                                  +
+                                </button>
+                              </div>
+
+                              {/* Per-Item Discount */}
+                              <div className="flex items-center gap-1">
+                                <span
+                                  className="text-xs font-mono uppercase"
+                                  style={{ color: theme.inkSoft }}
+                                >
+                                  Disc:
+                                </span>
+                                <div
+                                  className="flex items-center rounded-lg overflow-hidden"
+                                  style={{
+                                    border: `1px solid ${theme.line}`,
+                                    backgroundColor: "#fff",
+                                  }}
+                                >
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    value={item.discount ?? ""}
+                                    placeholder="0"
+                                    onChange={(e) => {
+                                      const val =
+                                        parseFloat(e.target.value) || 0;
+                                      handleUpdateCartItemDiscount(
+                                        item.medicineId,
+                                        val,
+                                        item.discountType || "percent",
+                                      );
+                                    }}
+                                    className="w-12 px-1.5 py-0.5 text-xs font-mono outline-none text-right"
+                                    style={{ color: theme.ink }}
+                                  />
+                                  <div className="flex items-center pl-0.5 pr-1">
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        handleUpdateCartItemDiscount(
+                                          item.medicineId,
+                                          item.discount || 0,
+                                          "percent",
+                                        )
+                                      }
+                                      className="px-1 py-0.5 text-[10px] font-bold rounded-l"
+                                      style={{
+                                        backgroundColor:
+                                          (item.discountType || "percent") ===
+                                          "percent"
+                                            ? palette.mintDeep
+                                            : "transparent",
+                                        color:
+                                          (item.discountType || "percent") ===
+                                          "percent"
+                                            ? "#fff"
+                                            : theme.inkSoft,
+                                      }}
+                                    >
+                                      %
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        handleUpdateCartItemDiscount(
+                                          item.medicineId,
+                                          item.discount || 0,
+                                          "amount",
+                                        )
+                                      }
+                                      className="px-1 py-0.5 text-[10px] font-bold rounded-r"
+                                      style={{
+                                        backgroundColor:
+                                          item.discountType === "amount"
+                                            ? palette.mintDeep
+                                            : "transparent",
+                                        color:
+                                          item.discountType === "amount"
+                                            ? "#fff"
+                                            : theme.inkSoft,
+                                      }}
+                                    >
+                                      Rs
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* Net Line Total */}
+                              <div className="text-right ml-auto">
+                                {item.discountAmount && item.discountAmount > 0 ? (
+                                  <div>
+                                    <span
+                                      className="line-through text-[11px] font-mono block opacity-60"
+                                      style={{ color: theme.inkSoft }}
+                                    >
+                                      Rs{(item.quantity * item.unitPrice).toFixed(2)}
+                                    </span>
+                                    <span
+                                      className="font-mono font-bold text-sm block"
+                                      style={{ color: palette.mintDeep }}
+                                    >
+                                      Rs{item.totalPrice.toFixed(2)}
+                                    </span>
+                                    <span
+                                      className="text-[10px] font-mono block"
+                                      style={{ color: palette.red }}
+                                    >
+                                      (-Rs{item.discountAmount.toFixed(2)})
+                                    </span>
+                                  </div>
+                                ) : (
+                                  <span
+                                    className="font-mono font-bold text-sm"
+                                    style={{ color: palette.mintDeep }}
+                                  >
+                                    Rs{item.totalPrice.toFixed(2)}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
                           </div>
                         ))}
-
-                        {/* Discount control */}
-                        <div
-                          className="flex items-center gap-2 p-2 rounded-lg text-sm"
-                          style={{
-                            backgroundColor: theme.bg,
-                            border: `1px solid ${theme.line}`,
-                          }}
-                        >
-                          <div className="flex items-center gap-1 flex-shrink-0">
-                            <button
-                              type="button"
-                              onClick={() => setCartDiscountType("percent")}
-                              className="px-2 py-1 rounded-full text-xs font-semibold"
-                              style={{
-                                backgroundColor:
-                                  cartDiscountType === "percent"
-                                    ? palette.mintDeep
-                                    : "transparent",
-                                color:
-                                  cartDiscountType === "percent"
-                                    ? "#fff"
-                                    : theme.inkSoft,
-                                border: `1px solid ${cartDiscountType === "percent" ? palette.mintDeep : theme.line}`,
-                              }}
-                            >
-                              %
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setCartDiscountType("amount")}
-                              className="px-2 py-1 rounded-full text-xs font-semibold"
-                              style={{
-                                backgroundColor:
-                                  cartDiscountType === "amount"
-                                    ? palette.mintDeep
-                                    : "transparent",
-                                color:
-                                  cartDiscountType === "amount"
-                                    ? "#fff"
-                                    : theme.inkSoft,
-                                border: `1px solid ${cartDiscountType === "amount" ? palette.mintDeep : theme.line}`,
-                              }}
-                            >
-                              Rs
-                            </button>
-                          </div>
-                          <input
-                            type="number"
-                            min="0"
-                            value={cartDiscount}
-                            onChange={(e) => setCartDiscount(e.target.value)}
-                            placeholder={
-                              cartDiscountType === "percent"
-                                ? "Customer Discount % (optional)"
-                                : "Customer Discount Rs (optional)"
-                            }
-                            className="flex-1 bg-transparent outline-none text-sm font-mono min-w-0"
-                            style={{ color: theme.ink }}
-                          />
-                          {cartDiscountAmount > 0 && (
-                            <button
-                              type="button"
-                              onClick={() => setCartDiscount("")}
-                              className="p-0.5 rounded-full flex-shrink-0"
-                              style={{ color: theme.inkSoft }}
-                              title="Clear discount"
-                            >
-                              <X size={14} />
-                            </button>
-                          )}
-                        </div>
 
                         {/* Cart Totals */}
                         <div className="space-y-1 pt-1">
@@ -2533,23 +2854,17 @@ const cartGrandTotal = useMemo(
                           >
                             <span>Subtotal</span>
                             <span className="font-mono">
-                              ${cartSubtotal.toFixed(2)}
+                              Rs{cartSubtotal.toFixed(2)}
                             </span>
                           </div>
-                          {cartDiscountAmount > 0 && (
+                          {cartTotalDiscount > 0 && (
                             <div
                               className="flex items-center justify-between px-2 text-sm font-semibold"
                               style={{ color: palette.red }}
                             >
-                              <span>
-                                Discount (
-                                {cartDiscountType === "percent"
-                                  ? `${Number(cartDiscount) || 0}%`
-                                  : "Rs"}
-                                )
-                              </span>
+                              <span>Item Discounts</span>
                               <span className="font-mono">
-                                -${cartDiscountAmount.toFixed(2)}
+                                -Rs{cartTotalDiscount.toFixed(2)}
                               </span>
                             </div>
                           )}
@@ -2562,7 +2877,7 @@ const cartGrandTotal = useMemo(
                           >
                             <span>Grand Total</span>
                             <span className="font-mono">
-                              ${cartGrandTotal.toFixed(2)}
+                              Rs{cartGrandTotal.toFixed(2)}
                             </span>
                           </div>
                         </div>
@@ -2818,8 +3133,21 @@ const cartGrandTotal = useMemo(
                                     >
                                       <span>
                                         {item.medicineName} × {item.quantity}
+                                        {item.discountAmount &&
+                                        item.discountAmount > 0 ? (
+                                          <span
+                                            style={{ color: palette.red }}
+                                            className="ml-1"
+                                          >
+                                            (-{item.discount}
+                                            {item.discountType === "amount"
+                                              ? "Rs"
+                                              : "%"}
+                                            )
+                                          </span>
+                                        ) : null}
                                       </span>
-                                      <span>${item.totalPrice.toFixed(2)}</span>
+                                      <span>Rs{item.totalPrice.toFixed(2)}</span>
                                     </div>
                                   ))}
                                 </div>
@@ -2827,7 +3155,7 @@ const cartGrandTotal = useMemo(
                                 <div className="flex items-center justify-between">
                                   <span style={{ color: theme.inkSoft }}>
                                     Qty: <strong>{sale.quantitySold}</strong> ×
-                                    ${sale.unitPrice.toFixed(2)}
+                                    Rs{sale.unitPrice.toFixed(2)}
                                   </span>
                                 </div>
                               )}
@@ -3174,7 +3502,22 @@ const cartGrandTotal = useMemo(
                               className="py-1 pr-2 text-left text-xs"
                               style={{ color: palette.inkSoft }}
                             >
-                              {item.medicineName}
+                              <div
+                                className="font-semibold"
+                                style={{ color: theme.ink }}
+                              >
+                                {item.medicineName}
+                              </div>
+                              {item.discountAmount && item.discountAmount > 0 ? (
+                                <div
+                                  className="text-[10px] font-mono"
+                                  style={{ color: palette.red }}
+                                >
+                                  Disc: {item.discount}
+                                  {item.discountType === "amount" ? "Rs" : "%"}{" "}
+                                  (-Rs{item.discountAmount.toFixed(2)})
+                                </div>
+                              ) : null}
                             </td>
                             <td className="py-1 pr-2 font-mono">
                               {item.quantity}
@@ -3206,22 +3549,24 @@ const cartGrandTotal = useMemo(
                                 totalPrice: lastSale.totalPrice,
                               } as CartItem,
                             ];
-                      const receiptSubtotal = receiptItems.reduce(
-                        (sum, item) => sum + item.totalPrice,
+                      const receiptGrossSubtotal = receiptItems.reduce(
+                        (sum, item) => sum + item.quantity * item.unitPrice,
                         0,
                       );
                       const receiptDiscountAmount =
                         lastSale.discountAmount && lastSale.discountAmount > 0
                           ? lastSale.discountAmount
-                          : 0;
-                      const receiptGrandTotal = Math.max(
-                        receiptSubtotal - receiptDiscountAmount,
-                        0,
-                      );
+                          : receiptItems.reduce(
+                              (sum, item) => sum + (item.discountAmount || 0),
+                              0,
+                            );
+                      const receiptGrandTotal =
+                        lastSale.totalPrice ??
+                        Math.max(receiptGrossSubtotal - receiptDiscountAmount, 0);
 
                       return (
                         <>
-                          <div className="flex justify-between items-center mb-4">
+                          <div className="flex justify-between items-center mb-2">
                             <span
                               className="font-mono text-xs"
                               style={{ color: palette.inkSoft }}
@@ -3229,7 +3574,7 @@ const cartGrandTotal = useMemo(
                               Subtotal
                             </span>
                             <span className="font-mono">
-                              Rs{receiptSubtotal.toFixed(2)}
+                              Rs{receiptGrossSubtotal.toFixed(2)}
                             </span>
                           </div>
                           {receiptDiscountAmount > 0 && (
@@ -3238,7 +3583,7 @@ const cartGrandTotal = useMemo(
                                 className="font-mono text-xs"
                                 style={{ color: palette.red }}
                               >
-                                Customer Discount
+                                Discount
                               </span>
                               <span
                                 className="font-mono"
@@ -3248,7 +3593,10 @@ const cartGrandTotal = useMemo(
                               </span>
                             </div>
                           )}
-                          <div className="flex justify-between items-center mb-3">
+                          <div
+                            className="flex justify-between items-center mb-3 pt-1 border-t border-dashed"
+                            style={{ borderColor: palette.line }}
+                          >
                             <span className="font-bold font-space">Total</span>
                             <span
                               className="font-bold font-space text-xl"

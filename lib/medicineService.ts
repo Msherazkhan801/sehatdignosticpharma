@@ -355,22 +355,39 @@ export async function recordBulkSale(params: {
     await updateDoc(medicineRef, { quantity: medData.quantity - item.quantity });
   }
 
-  // 2. Compute totals from the first item for backwards compatibility
+  // 2. Compute totals from items (supporting per-item discounts)
   const firstItem = items[0];
   const totalQty = items.reduce((sum, i) => sum + i.quantity, 0);
-  const subtotal = items.reduce((sum, i) => sum + i.totalPrice, 0);
+  // Gross subtotal (before any item discounts)
+  const grossSubtotal =
+    Math.round(
+      items.reduce((sum, i) => sum + i.quantity * i.unitPrice, 0) * 100
+    ) / 100;
+  // Sum of individual item discount amounts
+  const itemsDiscountTotal =
+    Math.round(
+      items.reduce((sum, i) => sum + (i.discountAmount || 0), 0) * 100
+    ) / 100;
 
-  // Apply customer discount (percentage or flat amount) to the actual bill
-  let discountAmount = 0;
+  // Optional legacy cart-level discount fallback
+  let extraCartDiscount = 0;
   if (discount && discount > 0) {
+    const remaining = Math.max(grossSubtotal - itemsDiscountTotal, 0);
     if (discountType === "percent") {
-      discountAmount = Math.min(subtotal * (Math.min(Math.max(discount, 0), 100) / 100), subtotal);
+      extraCartDiscount = Math.min(
+        remaining * (Math.min(Math.max(discount, 0), 100) / 100),
+        remaining
+      );
     } else {
-      discountAmount = Math.min(discount, subtotal);
+      extraCartDiscount = Math.min(discount, remaining);
     }
   }
-  discountAmount = Math.round(discountAmount * 100) / 100;
-  const totalPrice = Math.max(subtotal - discountAmount, 0);
+  extraCartDiscount = Math.round(extraCartDiscount * 100) / 100;
+
+  const totalDiscountAmount =
+    Math.round((itemsDiscountTotal + extraCartDiscount) * 100) / 100;
+  const totalPrice =
+    Math.round(Math.max(grossSubtotal - totalDiscountAmount, 0) * 100) / 100;
 
   // 3. Record the sale with all items
   const saleData: {
@@ -395,19 +412,19 @@ export async function recordBulkSale(params: {
     quantitySold: totalQty,
     unitPrice: firstItem.unitPrice,
     totalPrice,
-    subtotal,
+    subtotal: grossSubtotal,
     date: new Date().toISOString(),
     customerName: customerName || "Walk-in Customer",
     returnedQuantity: 0,
-    items, // Store all items for multi-item receipt
+    items, // Store all items with item discounts
   };
 
   if (discount && discount > 0) {
     saleData.discount = discount;
     saleData.discountType = discountType;
   }
-  if (discountAmount > 0) {
-    saleData.discountAmount = discountAmount;
+  if (totalDiscountAmount > 0) {
+    saleData.discountAmount = totalDiscountAmount;
   }
 
   const saleRef = await addDoc(collection(db, SALES_COLLECTION), saleData);

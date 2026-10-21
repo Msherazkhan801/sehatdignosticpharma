@@ -33,6 +33,9 @@ export interface CartItem {
   quantity: number;
   unitPrice: number;
   totalPrice: number;
+  discount?: number;
+  discountType?: "percent" | "amount";
+  discountAmount?: number;
   returnedQuantity?: number;
 }
 
