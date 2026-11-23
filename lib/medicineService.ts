@@ -336,8 +336,22 @@ export async function recordBulkSale(params: {
     throw new Error("No items in sale.");
   }
 
+  // Normalize every cart item so NO property is ever `undefined`
+  const sanitizedItems: CartItem[] = items.map((item) => ({
+    medicineId: item.medicineId,
+    medicineName: item.medicineName,
+    batchNo: item.batchNo || "N/A",
+    quantity: Number(item.quantity) || 0,
+    unitPrice: Number(item.unitPrice) || 0,
+    discount: Number(item.discount) || 0,
+    discountType: item.discountType || "percent",
+    discountAmount: Number(item.discountAmount) || 0,
+    totalPrice: Number(item.totalPrice) || 0,
+    returnedQuantity: Number(item.returnedQuantity) || 0,
+  }));
+
   // 1. Deduct stock for each item
-  for (const item of items) {
+  for (const item of sanitizedItems) {
     const medicineRef = doc(db, COLLECTION_NAME, item.medicineId);
     const medSnapshot = await getDoc(medicineRef);
 
@@ -356,20 +370,17 @@ export async function recordBulkSale(params: {
   }
 
   // 2. Compute totals from items (supporting per-item discounts)
-  const firstItem = items[0];
-  const totalQty = items.reduce((sum, i) => sum + i.quantity, 0);
-  // Gross subtotal (before any item discounts)
+  const firstItem = sanitizedItems[0];
+  const totalQty = sanitizedItems.reduce((sum, i) => sum + i.quantity, 0);
   const grossSubtotal =
     Math.round(
-      items.reduce((sum, i) => sum + i.quantity * i.unitPrice, 0) * 100
+      sanitizedItems.reduce((sum, i) => sum + i.quantity * i.unitPrice, 0) * 100
     ) / 100;
-  // Sum of individual item discount amounts
   const itemsDiscountTotal =
     Math.round(
-      items.reduce((sum, i) => sum + (i.discountAmount || 0), 0) * 100
+      sanitizedItems.reduce((sum, i) => sum + (i.discountAmount || 0), 0) * 100
     ) / 100;
 
-  // Optional legacy cart-level discount fallback
   let extraCartDiscount = 0;
   if (discount && discount > 0) {
     const remaining = Math.max(grossSubtotal - itemsDiscountTotal, 0);
@@ -389,7 +400,7 @@ export async function recordBulkSale(params: {
   const totalPrice =
     Math.round(Math.max(grossSubtotal - totalDiscountAmount, 0) * 100) / 100;
 
-  // 3. Record the sale with all items
+  // 3. Build saleData with only defined fields
   const saleData: {
     medicineId: string;
     medicineName: string;
@@ -408,20 +419,22 @@ export async function recordBulkSale(params: {
   } = {
     medicineId: firstItem.medicineId,
     medicineName: firstItem.medicineName,
-    batchNo: firstItem.batchNo,
+    batchNo: firstItem.batchNo || "N/A",
     quantitySold: totalQty,
     unitPrice: firstItem.unitPrice,
     totalPrice,
     subtotal: grossSubtotal,
     date: new Date().toISOString(),
-    customerName: customerName || "Walk-in Customer",
+    customerName: customerName?.trim() || "Walk-in Customer",
     returnedQuantity: 0,
-    items, // Store all items with item discounts
+    items: sanitizedItems,
   };
 
   if (discount && discount > 0) {
     saleData.discount = discount;
-    saleData.discountType = discountType;
+    if (discountType) {
+      saleData.discountType = discountType;
+    }
   }
   if (totalDiscountAmount > 0) {
     saleData.discountAmount = totalDiscountAmount;

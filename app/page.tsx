@@ -171,8 +171,8 @@ function calculateItemTotals(
 
   return {
     gross,
-    discount: disc > 0 ? disc : undefined,
-    discountType: disc > 0 ? discountType : undefined,
+    discount: disc > 0 ? disc : 0,
+    discountType: disc > 0 ? discountType : "percent",
     discountAmount: discountAmount > 0 ? discountAmount : 0,
     totalPrice,
   };
